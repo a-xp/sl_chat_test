@@ -3,6 +3,7 @@ package ru.shoppinglive.chat.perf_test
 import akka.Done
 import akka.actor.{Actor, ActorLogging, ActorRef, Cancellable, PoisonPill, Props}
 import akka.actor.Actor.Receive
+import akka.event.LoggingReceive
 import akka.http.javadsl.model.StatusCodes
 import akka.http.scaladsl.Http
 import akka.http.scaladsl.model.ws.WebSocketRequest
@@ -42,7 +43,7 @@ class User(val token:String)(implicit inj:Injector) extends Actor with Injectabl
   private val webSocketFlow = Http().webSocketClientFlow(WebSocketRequest(wsEndpoint))
   private val (upgradeResponse, closed) = source.viaMat(webSocketFlow)(Keep.right).toMat(sink)(Keep.both).run()
   private val connected = upgradeResponse.flatMap{
-    upgrade => if (upgrade.response.status == StatusCodes.OK) {
+    upgrade => if (upgrade.response.status == StatusCodes.SWITCHING_PROTOCOLS) {
       Future.successful(Done)
     } else {
       log.warning("Can not connect")
@@ -51,13 +52,13 @@ class User(val token:String)(implicit inj:Injector) extends Actor with Injectabl
   }
   connected.onComplete( _ => {})
 
-  def initChannels: Receive = {
+  def initChannels: Receive = LoggingReceive {
     case SenderRdy => out = Some(sender)
       context.become(authorizing)
       out.get ! TokenCmd(token)
   }
 
-  def authorizing: Receive = {
+  def authorizing: Receive = LoggingReceive {
     case AuthSuccessResult(role, roleName, login, id) => result = result.copy(userId = id)
       context.become(awaitingContacts)
       out.get ! GetContacts()
@@ -65,7 +66,7 @@ class User(val token:String)(implicit inj:Injector) extends Actor with Injectabl
       self ! PoisonPill
   }
 
-  def awaitingContacts: Receive = {
+  def awaitingContacts: Receive = LoggingReceive {
     case ContactsResult(seq) => val contacts = seq.asInstanceOf[Seq[Result.ContactInfo]]
       usersIds = contacts.toList.map(contact => (contact.userId, contact.dlgId)).toMap
       if(usersIds.exists(_._2==0)) {context.become(awaitingDialogs)
@@ -74,7 +75,7 @@ class User(val token:String)(implicit inj:Injector) extends Actor with Injectabl
         context.become(awaitingTestStart) }
   }
 
-  def awaitingDialogs: Receive = {
+  def awaitingDialogs: Receive = LoggingReceive {
     case ContactUpdate(contact) => usersIds = usersIds.updated(contact.userId, contact.dlgId)
         if(!usersIds.exists(_._2==0)){
           context.parent ! TestStart
@@ -82,14 +83,14 @@ class User(val token:String)(implicit inj:Injector) extends Actor with Injectabl
         }
   }
 
-  def awaitingTestStart: Receive = {
+  def awaitingTestStart: Receive = LoggingReceive {
     case TestStart => import scala.concurrent.duration._
       context.become(sendingMsg)
       orderedDlgIds = List.fill(msgNum)(Random.shuffle(usersIds.keys.toList)).flatten
       msgScheduler = Some(context.system.scheduler.schedule(0.seconds, msgInterval.seconds, self, SendNext))
   }
 
-  def sendingMsg:Receive = {
+  def sendingMsg:Receive = LoggingReceive {
     case SendNext if orderedDlgIds.nonEmpty => val to = orderedDlgIds.head
       orderedDlgIds = orderedDlgIds.tail
       out.get ! MsgCmd(usersIds(to), "test message")

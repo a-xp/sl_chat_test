@@ -1,14 +1,16 @@
 package ru.shoppinglive.chat.perf_test
 
-import akka.actor.{ActorRef, Props}
+import akka.actor.{ActorLogging, ActorRef, PoisonPill, Props}
+import akka.event.LoggingReceive
 import akka.http.scaladsl.model.ws.TextMessage
+import akka.stream.actor.ActorSubscriberMessage.{OnComplete, OnError, OnNext}
 import akka.stream.actor.{ActorSubscriber, RequestStrategy, WatermarkRequestStrategy}
 import ru.shoppinglive.chat.perf_test.User.ReceiverRdy
 
 /**
   * Created by rkhabibullin on 23.12.2016.
   */
-class Receiver(val master:ActorRef) extends ActorSubscriber{
+class Receiver(val master:ActorRef) extends ActorSubscriber with ActorLogging{
   override protected val requestStrategy = WatermarkRequestStrategy(20)
 
   override def preStart(): Unit = {
@@ -27,8 +29,10 @@ class Receiver(val master:ActorRef) extends ActorSubscriber{
     read[Result](tm.getStrictText)
   }
 
-  override def receive: Receive = {
-    case tm:TextMessage => master ! tmToResult(tm)
+  override def receive: Receive = LoggingReceive{
+    case OnNext(tm:TextMessage) => master ! tmToResult(tm)
+    case OnComplete => self ! PoisonPill
+    case OnError => self ! PoisonPill
   }
 
 }
