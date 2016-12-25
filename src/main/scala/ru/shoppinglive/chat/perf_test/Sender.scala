@@ -1,19 +1,19 @@
 package ru.shoppinglive.chat.perf_test
 
 import akka.actor.Actor.Receive
-import akka.actor.{ActorLogging, ActorRef, Props}
+import akka.actor.{ActorLogging, ActorRef, PoisonPill, Props}
 import akka.event.LoggingReceive
 import akka.http.scaladsl.model.ws.{Message, TextMessage}
 import akka.stream.actor.ActorPublisher
 import akka.stream.actor.ActorPublisherMessage.{Cancel, Request}
-import ru.shoppinglive.chat.perf_test.User.SenderRdy
+import ru.shoppinglive.chat.perf_test.User.{SenderRdy, StopStream}
 
 /**
   * Created by rkhabibullin on 23.12.2016.
   */
 class Sender(val master:ActorRef) extends ActorPublisher[Message] with ActorLogging{
   var buf = Vector.empty[Cmd]
-  val maxBufSize = 20
+  val maxBufSize = 200
 
   @scala.throws[Exception](classOf[Exception])
   override def preStart(): Unit = {
@@ -36,6 +36,8 @@ class Sender(val master:ActorRef) extends ActorPublisher[Message] with ActorLogg
     case cmd:Cmd => if(buf.isEmpty && totalDemand>0) onNext(cmdToString(cmd)) else {buf :+= cmd; feed()}
     case Request(_) => feed()
     case Cancel => context.stop(self)
+    case StopStream => onComplete()
+      self ! PoisonPill
   }
 
   def feed():Unit = {

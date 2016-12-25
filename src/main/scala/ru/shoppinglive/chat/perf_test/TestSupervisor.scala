@@ -2,8 +2,13 @@ package ru.shoppinglive.chat.perf_test
 
 import akka.actor.{Actor, ActorLogging, ActorRef, Props}
 import akka.actor.Actor.Receive
-import ru.shoppinglive.chat.perf_test.TestSupervisor.{NewTest, TestResult, TestStart}
+import akka.event.LoggingReceive
+import akka.stream.Materializer
+import ru.shoppinglive.chat.perf_test.CrmDataLoader.{TestInitFailed, TestInitSuccess, TestParams}
+import ru.shoppinglive.chat.perf_test.TestSupervisor._
 import scaldi.{Injectable, Injector}
+
+import scala.concurrent.ExecutionContext
 
 /**
   * Created by rkhabibullin on 23.12.2016.
@@ -11,52 +16,81 @@ import scaldi.{Injectable, Injector}
 class TestSupervisor(implicit inj:Injector) extends Actor with Injectable with ActorLogging{
   private var testers = List.empty[ActorRef]
   override def receive:Receive = idle
-  private val adminUrl = inject[String]("test.admin_url")
-  private val tokens = List("356200", "356624", "355259")
   private var results = List.empty[TestResult]
   private var rdy = 0
 
-  def idle:Receive = {
+  private val userNum = inject[Int]("test.num_users")
+  private val userMsgNum = inject[Int]("test.user_msg_num")
+  private val adminNum = inject[Int]("test.num_admins")
+  private val adminMsgNum = inject[Int]("test.admin_msg_num")
+  private val userMsgInterval = inject[Int]("test.user_msg_interval")
+  private val adminMsgInterval = inject[Int]("test.admin_msg_interval")
+  private implicit val system = context.system
+  private implicit val ec = inject[ExecutionContext]
+  private implicit val mat = inject[Materializer]
+
+
+  private val crmDataLoader = context.actorOf(CrmDataLoader.props, "crm-loader")
+
+  def idle:Receive = LoggingReceive {
     case NewTest => results = List.empty
       rdy = 0
-      testers = tokens map (token => context.actorOf(User.props(token), "tester-"+token))
+      crmDataLoader ! TestParams(userNum, adminNum)
+    case TestInitSuccess(users, admins) =>
+      testers = users.map(token => context.actorOf(User.props(token, userMsgNum, userMsgNum), "tester-"+token)).toList :::
+      admins.map(token => context.actorOf(User.props(token, adminMsgNum, adminMsgInterval), "tester-"+token)).toList
       context.become(initializingTest)
-      println("Initializing")
+      log.info("Initializing")
+    case TestInitFailed => println("Failed to setup crm data")
   }
 
-  def initializingTest:Receive = {
+  def initializingTest:Receive = LoggingReceive {
     case TestStart => rdy+=1
-      startTest()
-    case result:TestResult => rdy+=1; results = result :: results
-      startTest()
+      if(rdy==testers.size){
+        rdy = 0
+        testers foreach (_ ! TestStart)
+        context.become(testing)
+        log.info("Test started")
+      }
   }
 
-  def testing:Receive = {
+  def testing:Receive = LoggingReceive {
+    case TestEnd => rdy+=1
+      if(rdy == testers.size){
+        rdy = 0
+        import scala.concurrent.duration._
+        context.system.scheduler.scheduleOnce(inject[Int]("test.await_results").seconds, self, CollectResults)
+      }
+    case CollectResults =>
+      testers foreach(_ ! TestEnd)
+      context.become(collectingResults)
+  }
+
+  def collectingResults:Receive = LoggingReceive{
     case result:TestResult => results = result :: results
       if(results.size==testers.size){
-        println("Test end")
-        println(results)
+        log.info("Test end")
+        printResults()
         context.become(idle)
       }
   }
 
-  private def startTest():Unit = {
-    if(rdy==testers.size){
-      rdy = 0
-      testers foreach (_ ! TestStart)
-      context.become(testing)
-      println("test started")
-    }
+  private def printResults() = {
+    val (success, fail) = results partition (_.success)
+    println(s"Success: ${success.size}, Failed: ${fail.size}")
+    if(success.nonEmpty)
+      println(s"Avg latency: ${success.map(_.latency).sum / success.size} ms")
+
   }
 
 }
 
 
 object TestSupervisor{
-  case class TestResult(success:Boolean, userId:Int, msgReceived:Map[Int, Int], msgSent:Map[Int,Int])
+  case class TestResult(success:Boolean, userId:Int, msgReceived:Map[Int, Int], msgSent:Map[Int,Int], latency:Long)
   case object TestEnd
   case object TestStart
-
+  case object CollectResults
   case object NewTest
 
   def props(implicit inj:Injector) = Props(new TestSupervisor)

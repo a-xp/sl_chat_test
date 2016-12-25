@@ -5,7 +5,7 @@ import akka.event.LoggingReceive
 import akka.http.scaladsl.model.ws.TextMessage
 import akka.stream.actor.ActorSubscriberMessage.{OnComplete, OnError, OnNext}
 import akka.stream.actor.{ActorSubscriber, RequestStrategy, WatermarkRequestStrategy}
-import ru.shoppinglive.chat.perf_test.User.ReceiverRdy
+import ru.shoppinglive.chat.perf_test.User.{ReceiverRdy, StopStream}
 
 /**
   * Created by rkhabibullin on 23.12.2016.
@@ -33,6 +33,7 @@ class Receiver(val master:ActorRef) extends ActorSubscriber with ActorLogging{
     case OnNext(tm:TextMessage) => master ! tmToResult(tm)
     case OnComplete => self ! PoisonPill
     case OnError => self ! PoisonPill
+    case StopStream => self ! PoisonPill
   }
 
 }

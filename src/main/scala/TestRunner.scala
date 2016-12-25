@@ -26,5 +26,5 @@ object TestRunner extends App with Injectable{
   runner ! NewTest
 
   StdIn.readLine()
-
+  system.terminate()
 }
