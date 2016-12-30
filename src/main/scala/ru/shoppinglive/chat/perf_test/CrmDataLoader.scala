@@ -1,7 +1,7 @@
 package ru.shoppinglive.chat.perf_test
 
 import akka.actor.Actor.Receive
-import akka.actor.{Actor, ActorLogging, Props}
+import akka.actor.{Actor, ActorLogging, ActorRef, Cancellable, Props}
 import akka.event.LoggingReceive
 import akka.http.scaladsl.Http
 import akka.http.scaladsl.model.{HttpMethods, HttpRequest, HttpResponse, StatusCodes}
@@ -15,7 +15,7 @@ import ru.shoppinglive.chat.perf_test.TestSupervisor.NewTest
 import scaldi.{Injectable, Injector}
 
 import scala.concurrent.{ExecutionContext, Future}
-import scala.util.Success
+import scala.util.{Failure, Success}
 
 /**
   * Created by 1 on 25.12.2016.
@@ -29,26 +29,58 @@ class CrmDataLoader(implicit val inj:Injector) extends Actor with ActorLogging w
   import org.json4s.native.Serialization
   import org.json4s.native.Serialization._
   implicit private val formats = DefaultFormats + RoleSerializer
+  private val batchSize = 4
+  private val batchInterval = 1
 
+  private var toSend = List.empty[UserAdd]
+  private var numRequests = 0
+  private var numResults = 0
+  private var results = List.empty[UserInfo]
+  private var scheduler:Option[Cancellable] = None
+  private var originalSender:Option[ActorRef] = None
+  override def receive: Receive = idle
+  import scala.concurrent.duration._
 
-  override def receive: Receive = LoggingReceive{
+  def idle:Receive = LoggingReceive{
     case TestParams(users, admins) =>
-      val originalSender = sender
+      originalSender = Some(sender)
       http.singleRequest(HttpRequest(HttpMethods.POST, apiUrl+"/reset")) onComplete {
         case Success(HttpResponse(StatusCodes.OK,_,_,_)) =>
-          Future.sequence((1 to users map(i=> http.singleRequest(HttpRequest(HttpMethods.POST, apiUrl+"/user",
-            entity = write[UserAdd](UserAdd("Тестер", "Оператор-"+i,i, Operator, "operator-"+i))))
-            flatMap(response => Unmarshal(response.entity).to[String]) map read[UserInfo])).toList :::
-            (1 to admins map (i=> http.singleRequest(HttpRequest(HttpMethods.POST, apiUrl+"/user",
-              entity = write[UserAdd](UserAdd("Тестер", "Супервайзер-"+i, 10000+i, Admin, "admin-"+i))))
-              flatMap(response => Unmarshal(response.entity).to[String]) map read[UserInfo])).toList) onComplete {
-            case Success(results) => val(adminTokens, userTokens) = results.asInstanceOf[Seq[UserInfo]] partition(_.role==Admin)
-              originalSender ! TestInitSuccess(userTokens map(_.crmId.toString), adminTokens map(_.crmId.toString))
-            case e => println(e); originalSender ! TestInitFailed
-          }
-        case e => println(e); originalSender ! TestInitFailed
+          results = List.empty
+          numRequests = users+admins
+          numResults = 0
+          toSend = (1 to users map(i=>UserAdd("Тестер", "Оператор-"+i,i, Operator, "operator-"+i))).toList :::
+            (1 to admins map(i=>UserAdd("Тестер", "Супервайзер-"+i, 10000+i, Admin, "admin-"+i))).toList
+          context.system.scheduler.schedule(0.seconds, batchInterval.seconds, self, NextBatch)
+          context.become(sending)
+        case e => println(e); originalSender.get ! TestInitFailed
       }
   }
+
+  def sending:Receive = LoggingReceive{
+    case NextBatch if toSend.isEmpty => scheduler foreach(_.cancel); scheduler = None
+    case NextBatch =>
+      val (send,keep) = toSend.splitAt(batchSize)
+      send map(u=> http.singleRequest(HttpRequest(HttpMethods.POST, apiUrl+"/user",
+      entity = write[UserAdd](u))) flatMap(response => Unmarshal(response.entity).to[String]) map read[UserInfo]) foreach(_.onComplete{
+        case Success(u) => self ! u
+        case Failure(e) => log.warning("failed to create user ", e)
+          numResults+=1; sendResult()
+      })
+      toSend = keep
+    case u:UserInfo => numResults+=1; results :+= u
+      sendResult()
+
+  }
+  def sendResult(): Unit ={
+    if(numResults==numRequests){
+      val (admins, users) = results.partition(_.role==Admin)
+      originalSender.get ! TestInitSuccess(admins map(_.crmId.toString), users map(_.crmId.toString))
+      context.become(idle)
+      scheduler foreach(_.cancel)
+    }
+  }
+
 }
 
 object CrmDataLoader{
@@ -57,6 +89,7 @@ object CrmDataLoader{
   case class TestInitSuccess(users:Seq[String], admins:Seq[String])
   case object TestInitFailed
   case class TestParams(users:Int, admins:Int)
+  case object NextBatch
 
   sealed trait Cmd
   case class GroupAdd(name: String) extends Cmd

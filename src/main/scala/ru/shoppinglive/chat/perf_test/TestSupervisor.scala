@@ -28,7 +28,7 @@ class TestSupervisor(implicit inj:Injector) extends Actor with Injectable with A
   private implicit val system = context.system
   private implicit val ec = inject[ExecutionContext]
   private implicit val mat = inject[Materializer]
-
+  private var startedBy:Option[ActorRef] = None
 
   private val crmDataLoader = context.actorOf(CrmDataLoader.props, "crm-loader")
 
@@ -36,12 +36,14 @@ class TestSupervisor(implicit inj:Injector) extends Actor with Injectable with A
     case NewTest => results = List.empty
       rdy = 0
       crmDataLoader ! TestParams(userNum, adminNum)
+      startedBy = Some(sender)
     case TestInitSuccess(users, admins) =>
       testers = users.map(token => context.actorOf(User.props(token, userMsgNum, userMsgNum), "tester-"+token)).toList :::
       admins.map(token => context.actorOf(User.props(token, adminMsgNum, adminMsgInterval), "tester-"+token)).toList
       context.become(initializingTest)
       log.info("Initializing")
     case TestInitFailed => println("Failed to setup crm data")
+      startedBy.get ! false
   }
 
   def initializingTest:Receive = LoggingReceive {
@@ -80,7 +82,7 @@ class TestSupervisor(implicit inj:Injector) extends Actor with Injectable with A
     println(s"Success: ${success.size}, Failed: ${fail.size}")
     if(success.nonEmpty)
       println(s"Avg latency: ${success.map(_.latency).sum / success.size} ms")
-
+    startedBy.get ! results
   }
 
 }
