@@ -29,7 +29,7 @@ class CrmDataLoader(implicit val inj:Injector) extends Actor with ActorLogging w
   import org.json4s.native.Serialization
   import org.json4s.native.Serialization._
   implicit private val formats = DefaultFormats + RoleSerializer
-  private val batchSize = 4
+  private val batchSize = 5
   private val batchInterval = 1
 
   private var toSend = List.empty[UserAdd]
@@ -51,20 +51,20 @@ class CrmDataLoader(implicit val inj:Injector) extends Actor with ActorLogging w
           numResults = 0
           toSend = (1 to users map(i=>UserAdd("Тестер", "Оператор-"+i,i, Operator, "operator-"+i))).toList :::
             (1 to admins map(i=>UserAdd("Тестер", "Супервайзер-"+i, 10000+i, Admin, "admin-"+i))).toList
-          context.system.scheduler.schedule(0.seconds, batchInterval.seconds, self, NextBatch)
           context.become(sending)
+          scheduler = Some(context.system.scheduler.schedule(0.seconds, batchInterval.seconds, self, NextBatch))
         case e => println(e); originalSender.get ! TestInitFailed
       }
   }
 
   def sending:Receive = LoggingReceive{
-    case NextBatch if toSend.isEmpty => scheduler foreach(_.cancel); scheduler = None
+    case NextBatch if toSend.isEmpty => scheduler foreach(_.cancel()); scheduler = None
     case NextBatch =>
       val (send,keep) = toSend.splitAt(batchSize)
       send map(u=> http.singleRequest(HttpRequest(HttpMethods.POST, apiUrl+"/user",
       entity = write[UserAdd](u))) flatMap(response => Unmarshal(response.entity).to[String]) map read[UserInfo]) foreach(_.onComplete{
         case Success(u) => self ! u
-        case Failure(e) => log.warning("failed to create user ", e)
+        case Failure(e) => log.error("failed to create user: {}", e)
           numResults+=1; sendResult()
       })
       toSend = keep
@@ -74,10 +74,10 @@ class CrmDataLoader(implicit val inj:Injector) extends Actor with ActorLogging w
   }
   def sendResult(): Unit ={
     if(numResults==numRequests){
+      scheduler foreach(_.cancel())
       val (admins, users) = results.partition(_.role==Admin)
       originalSender.get ! TestInitSuccess(admins map(_.crmId.toString), users map(_.crmId.toString))
       context.become(idle)
-      scheduler foreach(_.cancel)
     }
   }
 
@@ -86,7 +86,7 @@ class CrmDataLoader(implicit val inj:Injector) extends Actor with ActorLogging w
 object CrmDataLoader{
   def props(implicit inj:Injector) = Props(new CrmDataLoader)
 
-  case class TestInitSuccess(users:Seq[String], admins:Seq[String])
+  case class TestInitSuccess(admins:Seq[String], users:Seq[String])
   case object TestInitFailed
   case class TestParams(users:Int, admins:Int)
   case object NextBatch

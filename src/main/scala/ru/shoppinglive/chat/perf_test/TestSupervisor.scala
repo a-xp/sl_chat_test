@@ -37,9 +37,9 @@ class TestSupervisor(implicit inj:Injector) extends Actor with Injectable with A
       rdy = 0
       crmDataLoader ! TestParams(userNum, adminNum)
       startedBy = Some(sender)
-    case TestInitSuccess(users, admins) =>
-      testers = users.map(token => context.actorOf(User.props(token, userMsgNum, userMsgNum), "tester-"+token)).toList :::
-      admins.map(token => context.actorOf(User.props(token, adminMsgNum, adminMsgInterval), "tester-"+token)).toList
+    case TestInitSuccess(admins, users) =>
+      testers = users.map(token => context.actorOf(User.props(token, userMsgNum, userMsgInterval), "tester-"+token)).toList// :::
+     // admins.map(token => context.actorOf(User.props(token, adminMsgNum, adminMsgInterval), "tester-"+token)).toList
       context.become(initializingTest)
       log.info("Initializing")
     case TestInitFailed => println("Failed to setup crm data")
@@ -60,6 +60,7 @@ class TestSupervisor(implicit inj:Injector) extends Actor with Injectable with A
     case TestEnd => rdy+=1
       if(rdy == testers.size){
         rdy = 0
+        log.info("awaiting lost messages")
         import scala.concurrent.duration._
         context.system.scheduler.scheduleOnce(inject[Int]("test.await_results").seconds, self, CollectResults)
       }

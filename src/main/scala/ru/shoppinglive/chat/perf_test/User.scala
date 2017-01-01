@@ -32,8 +32,8 @@ class User(val token:String, val msgNum:Int, val msgInterval:Int)(implicit inj:I
   private var orderedDlgIds = List.empty[Int]
   private var usersIds = Map.empty[Int, Int]
   private var msgScheduler:Option[Cancellable] = None
-
-  private var latency = 0L
+  private var sendTimes = List.empty[Long]
+  private var receiveTimes = List.empty[Long]
 
   private val wsEndpoint = inject[String]("test.chat_url")
 
@@ -73,17 +73,28 @@ class User(val token:String, val msgNum:Int, val msgInterval:Int)(implicit inj:I
       context.become(awaitingTestStart)
   }
 
+  private var findList = List.empty[Int]
   def awaitingContacts: Receive = LoggingReceive {
     case ContactsResult(seq) => val contacts = seq.asInstanceOf[Seq[Result.ContactInfo]]
       usersIds = contacts.toList.map(contact => (contact.userId, contact.dlgId)).toMap
       if(usersIds.exists(_._2==0)) {context.become(awaitingDialogs)
-        usersIds filter(_._2==0) foreach { pair => out.get ! FindOrCreateDlgCmd(pair._1) }
+        findList = usersIds.filter(_._2==0).keys.toList
+        import scala.concurrent.duration._
+        context.become(awaitingDialogs)
+        msgScheduler =Some(context.system.scheduler.schedule(0.seconds, 1.seconds, self, SendNext))
       } else { context.parent ! TestStart
         context.become(awaitingTestStart) }
   }
 
   def awaitingDialogs: Receive = LoggingReceive {
-    case ContactUpdate(contact) => usersIds = usersIds.updated(contact.userId, contact.dlgId)
+    case SendNext => val (send,keep) = findList.splitAt(10)
+      send foreach { userId => out.get ! FindOrCreateDlgCmd(userId) }
+      findList = keep
+      if(keep.isEmpty){
+        msgScheduler foreach(_.cancel())
+        msgScheduler = None
+      }
+    case DialogIdResult(userId, dlgId) => usersIds = usersIds.updated(userId, dlgId)
         if(!usersIds.exists(_._2==0)){
           context.parent ! TestStart
           context.become(awaitingTestStart)
@@ -102,7 +113,7 @@ class User(val token:String, val msgNum:Int, val msgInterval:Int)(implicit inj:I
   def sendingMsg:Receive = LoggingReceive {
     case SendNext if orderedDlgIds.nonEmpty => val to = orderedDlgIds.head
       orderedDlgIds = orderedDlgIds.tail
-      latency -= System.currentTimeMillis()
+      sendTimes = System.currentTimeMillis() :: sendTimes
       out.get ! MsgCmd(usersIds(to), "test message")
       val num = result.msgSent.getOrElse(to, 0)
       result = result.copy(msgSent = result.msgSent.updated(to, num+1))
@@ -111,8 +122,8 @@ class User(val token:String, val msgNum:Int, val msgInterval:Int)(implicit inj:I
         context.parent ! TestEnd
         context.become(awaitingTestEnd)
       }
-    case DialogNewMsg(dlgId, msg) =>
-      latency += System.currentTimeMillis()
+    case DialogMsgAccepted(dlgId, msg, time) =>
+      receiveTimes = System.currentTimeMillis() :: receiveTimes
     case ContactUpdate(contact) =>
       val num = result.msgReceived.getOrElse(contact.userId, 0)
       result = result.copy(msgReceived = result.msgReceived.updated(contact.userId, num+1))
@@ -120,11 +131,14 @@ class User(val token:String, val msgNum:Int, val msgInterval:Int)(implicit inj:I
 
   def awaitingTestEnd:Receive = LoggingReceive {
     case TestEnd =>
-      result = result.copy(success = true, latency=latency/msgNum)
+      if(sendTimes.size==receiveTimes.size && sendTimes.nonEmpty){
+        val lat =(receiveTimes zip sendTimes).map(e=>e._1-e._2)
+        result = result.copy(success = true, latency=(lat.sum/lat.size).toInt)
+      }
       context.parent ! result
       self ! PoisonPill
-    case DialogNewMsg(dlgId, msg) =>
-      latency += System.currentTimeMillis()
+    case DialogMsgAccepted(dlgId, msg, time) =>
+      receiveTimes = System.currentTimeMillis() :: receiveTimes
     case ContactUpdate(contact) =>
       val num = result.msgReceived.getOrElse(contact.userId, 0)
       result = result.copy(msgReceived = result.msgReceived.updated(contact.userId, num+1))

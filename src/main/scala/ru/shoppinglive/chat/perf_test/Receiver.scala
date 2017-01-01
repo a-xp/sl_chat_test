@@ -33,7 +33,8 @@ class Receiver(val master:ActorRef) extends ActorSubscriber with ActorLogging{
     import org.json4s.native.Serialization._
     implicit val formats = Serialization.formats(ShortTypeHints(List(classOf[AuthSuccessResult], classOf[AuthFailedResult],
       classOf[GroupsResult], classOf[ContactsResult], classOf[ContactUpdate], classOf[DialogNewMsg],
-      classOf[DialogMsgList], classOf[TypingNotification])))
+      classOf[DialogMsgList], classOf[TypingNotification], classOf[DialogIdResult], classOf[ContactChanges],
+      classOf[DialogMsgAccepted])))
     if(tm.isStrict){
       Future.successful(read[Result](tm.getStrictText))
     }else{
